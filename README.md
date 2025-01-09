@@ -7,11 +7,7 @@
 
 - **Dynamic Key Selection**: Automatically extracts keys from the JSON data and prompts the user to select which keys to include in the CSV.
 - **HTML Character Escaping**: Optionally escape characters that may be interpreted as HTML to ensure data integrity.
-- **Progress Tracking**: Utilizes 
-
-tqdm
-
- to display a progress bar while converting JSON to CSV.
+- **Progress Tracking**: displays a progress bar while converting JSON to CSV.
 - **Flexible Input Handling**: Supports both JSON arrays and JSON objects containing a `data` key.
 
 ## Usage
