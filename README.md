@@ -14,8 +14,8 @@
 
 1. **Clone the Repository**:
    ```sh
-   git clone https://github.com/yourusername/your-repo.git
-   cd your-repo
+   git clone https://github.com/Pb-22/json2csv.py.git
+   cd 
    ```
 
 2. **Run the Script**:
