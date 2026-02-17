@@ -21,40 +21,6 @@ def iter_rows(iterable, desc="Converting JSON to CSV", unit="rows"):
     return tqdm(iterable, desc=desc, unit=unit)
 
 
-def get_keys_from_json(json_data):
-    keys = set()
-    if isinstance(json_data, list):
-        for item in json_data:
-            if isinstance(item, dict):
-                keys.update(item.keys())
-    elif isinstance(json_data, dict):
-        keys.update(json_data.keys())
-    return list(keys)
-
-
-def prompt_for_keys(keys):
-    print("Available keys:")
-    for i, key in enumerate(keys):
-        print(f"{i + 1}. {key}")
-
-    selected_keys = input(
-        "Enter the numbers of the keys you want to include, separated by commas, or type 'all': "
-    ).strip().lower()
-
-    if selected_keys == "all":
-        return keys
-
-    selected = []
-    for part in selected_keys.split(","):
-        part = part.strip()
-        if not part.isdigit():
-            continue
-        idx = int(part) - 1
-        if 0 <= idx < len(keys):
-            selected.append(keys[idx])
-    return selected
-
-
 def prompt_for_escape():
     choice = input("Escape HTML characters? (Y/n): ").strip().lower()
     return choice == "" or choice == "y"
@@ -112,6 +78,17 @@ def compress_csv(csv_path, method):
         subprocess.run(["zip", csv_path + ".zip", csv_path], check=False)
     elif method == "bz2":
         subprocess.run(["bzip2", csv_path], check=False)
+
+
+def get_keys_from_json(json_data):
+    keys = set()
+    if isinstance(json_data, list):
+        for item in json_data:
+            if isinstance(item, dict):
+                keys.update(item.keys())
+    elif isinstance(json_data, dict):
+        keys.update(json_data.keys())
+    return list(keys)
 
 
 def _node_type_label(node):
@@ -255,19 +232,94 @@ def _resolve_path(root, path_str):
     return node
 
 
+def _format_example(val, max_len=90):
+    if val is None:
+        s = ""
+    else:
+        s = str(val)
+    s = s.replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")
+    if len(s) > max_len:
+        s = s[: max_len - 3] + "..."
+    return s
+
+
+def _first_row_dict(records):
+    for item in records:
+        if isinstance(item, dict):
+            return item
+    return None
+
+
+def _candidate_preview(records, max_cols=30):
+    """
+    Preview keys + examples from first row.
+    """
+    row = _first_row_dict(records)
+    if not row:
+        return [], {}
+
+    keys = list(row.keys())
+    shown = keys[:max_cols]
+    examples = {k: _format_example(row.get(k)) for k in shown}
+    return keys, examples
+
+
+def prompt_for_columns_with_examples(records):
+    """
+    Keep Column? prompt with example, default Yes (Enter).
+    Also supports typing 'all' once to keep all without prompts.
+    """
+    row = _first_row_dict(records) or {}
+    keys = list(row.keys())
+
+    if not keys:
+        # fallback: union across rows (bounded)
+        union = set()
+        for item in records[:200]:
+            if isinstance(item, dict):
+                union.update(item.keys())
+        keys = sorted(union)
+
+    if not keys:
+        return []
+
+    mode = input("Column selection: press Enter to review each column, or type 'all' to keep all: ").strip().lower()
+    if mode == "all":
+        return keys
+
+    selected = []
+    for k in keys:
+        ex = _format_example(row.get(k))
+        yn = input(f'Keep {k}? example - "{ex}": (Y/n) ').strip().lower()
+        if yn == "" or yn == "y":
+            selected.append(k)
+
+    return selected
+
+
 def choose_records_node_interactive(json_data):
     """
-    Navigator:
-      - shows current node summary
-      - descend into dict keys or list indices
-      - go up
-      - choose current node as records
+    Guided explorer:
+      - Candidate prompt shows preview of record keys + example values
+      - After rejecting candidate, you can drill down using either key name or a number
+      - Up always available if you are not at root
+      - 'r' only works on list-of-dicts (prevents using wrong level)
     """
     candidates = _find_record_list_candidates(json_data)
     if candidates:
         best_path, best_node = candidates[0]
         best_path_str = _path_tokens_to_str(best_path)
-        yn = input(f"Found candidate record list at {best_path_str}. Use it? (Y/n): ").strip().lower()
+
+        keys, examples = _candidate_preview(best_node)
+        print(f"Found candidate record list at {best_path_str} ({len(best_node)} rows).")
+        if keys:
+            print("Preview (keys one level down / potential column headers):")
+            for k in keys[:30]:
+                print(f'  - {k}: "{examples.get(k, "")}"')
+            if len(keys) > 30:
+                print("  ...")
+
+        yn = input("Use it? (Y/n): ").strip().lower()
         if yn == "" or yn == "y":
             return best_node, best_path_str
 
@@ -282,20 +334,49 @@ def choose_records_node_interactive(json_data):
         print(f"Current type: {_node_type_label(node)}")
 
         preview, more = _preview_child_types(node)
+
         if isinstance(node, dict):
+            keys = list(node.keys())
             print("Keys (type):")
-            for k, t in preview:
-                print(f"  - {k}: {t}")
+            for i, (k, t) in enumerate(preview, start=1):
+                print(f"  {i}. {k}: {t}")
             if more:
                 print(f"  ... ({more} more keys)")
-            print("\nCommands: d <key> (descend), u (up), r (use as records), q (quit)")
+
+            print("\nCommands:")
+            print("  d <key>   drill down by key (example: d data)")
+            print("  d <num>   drill down by number shown above (example: d 2)")
+            if stack:
+                print("  u         up to parent")
+            print("  r         use current node as records (only works on list of objects)")
+            print("  q         quit")
+
         elif isinstance(node, list):
             print("List element types (sample):")
             for t, cnt in preview:
                 print(f"  - {t}: {cnt}")
-            print("\nCommands: d <index> (descend), u (up), r (use as records), q (quit)")
+
+            if _is_list_of_dicts(node):
+                keys, examples = _candidate_preview(node)
+                if keys:
+                    print("\nThis looks like a records list. Preview columns:")
+                    for k in keys[:15]:
+                        print(f'  - {k}: "{examples.get(k, "")}"')
+                    if len(keys) > 15:
+                        print("  ...")
+
+            print("\nCommands:")
+            print("  d <index> drill down by index (example: d 0)")
+            if stack:
+                print("  u         up to parent")
+            print("  r         use current node as records (only works on list of objects)")
+            print("  q         quit")
+
         else:
-            print("\nCommands: u (up), q (quit)")
+            print("\nCommands:")
+            if stack:
+                print("  u         up to parent")
+            print("  q         quit")
 
         cmd = input("> ").strip()
         if not cmd:
@@ -317,21 +398,27 @@ def choose_records_node_interactive(json_data):
         if lc == "r":
             if _is_list_of_dicts(node):
                 return node, path_str
-            if isinstance(node, dict):
-                return [node], path_str
-            print("Current node is not usable as records. Choose a list of objects (dicts) or a dict.")
+            print("Not at a usable records node yet. Drill down to a list of objects first.")
             continue
 
         if lc.startswith("d "):
             arg = cmd[2:].strip()
+
             if isinstance(node, dict):
-                if arg not in node:
-                    print(f"Key not found: {arg}")
+                # numeric selection support
+                keys = list(node.keys())
+                num_map = {str(i + 1): k for i, k in enumerate(keys)}
+                key = num_map.get(arg, arg)
+
+                if key not in node:
+                    print(f"Key not found: {key}")
                     continue
+
                 stack.append((node, path_tokens))
-                node = node[arg]
-                path_tokens = path_tokens + [arg]
+                node = node[key]
+                path_tokens = path_tokens + [key]
                 continue
+
             if isinstance(node, list):
                 if not arg.isdigit():
                     print("For lists, use an integer index (e.g., d 0).")
@@ -340,14 +427,16 @@ def choose_records_node_interactive(json_data):
                 if idx < 0 or idx >= len(node):
                     print(f"Index out of range: {idx}")
                     continue
+
                 stack.append((node, path_tokens))
                 node = node[idx]
                 path_tokens = path_tokens + [idx]
                 continue
-            print("Cannot descend into a scalar value.")
+
+            print("Cannot drill down into a scalar value.")
             continue
 
-        print("Unrecognized command. Try: d <key|index>, u, r, q")
+        print("Unrecognized command. Try: d <key|num|index>, u, r, q")
 
 
 def json_to_csv(csv_path, data_items, desired_keys, escape_html):
@@ -400,7 +489,6 @@ def main():
         print(f"Error reading file: {e}")
         sys.exit(1)
 
-    # Determine record list (data_items)
     records_path_used = "$"
 
     if args.records_path:
@@ -412,17 +500,15 @@ def main():
 
         if _is_list_of_dicts(node):
             data_items = node
-        elif isinstance(node, dict):
-            data_items = [node]
+            records_path_used = args.records_path
         else:
-            print(f"Error: records node at '{args.records_path}' is not a list of objects or a dict.")
+            print(f"Error: records node at '{args.records_path}' is not a list of objects.")
             sys.exit(1)
-        records_path_used = args.records_path
 
     elif args.no_navigate:
-        if isinstance(json_data, list):
+        if isinstance(json_data, list) and _is_list_of_dicts(json_data):
             data_items = json_data
-        elif isinstance(json_data, dict) and "data" in json_data and isinstance(json_data["data"], list):
+        elif isinstance(json_data, dict) and "data" in json_data and _is_list_of_dicts(json_data["data"]):
             data_items = json_data["data"]
             records_path_used = "$.data"
         else:
@@ -432,14 +518,13 @@ def main():
     else:
         data_items, records_path_used = choose_records_node_interactive(json_data)
 
-    keys = get_keys_from_json(data_items)
-    if not keys:
-        print(f"Error: No keys found at records node {records_path_used}.")
+    if not _is_list_of_dicts(data_items):
+        print(f"Error: records node {records_path_used} is not a list of objects.")
         sys.exit(1)
 
-    keys_to_extract = prompt_for_keys(keys)
+    keys_to_extract = prompt_for_columns_with_examples(data_items)
     if not keys_to_extract:
-        print("Error: No keys selected.")
+        print("Error: No columns selected.")
         sys.exit(1)
 
     escape_html_choice = prompt_for_escape()
